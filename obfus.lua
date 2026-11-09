@@ -76,28 +76,51 @@ end
 ---------------------------------------------------------------------
 -- SERVICES & MODULE GAME
 ---------------------------------------------------------------------
-local Players = game:GetService("Players")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
-local VirtualUser = game:GetService("VirtualUser")
-local UserInputService = game:GetService("UserInputService")
-local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+-- 1. Ganti WaitForChild dengan pencarian dinamis
+local Shared = ReplicatedStorage:FindFirstChild("Shared")
+if not Shared then
+    -- Jika tidak ketemu, sapu semua folder untuk mencari yang punya ItemDB atau Net
+    for _, v in ipairs(ReplicatedStorage:GetChildren()) do
+        if v:IsA("Folder") and (v:FindFirstChild("ItemDB") or v:FindFirstChild("Net")) then
+            Shared = v
+            break
+        end
+    end
+end
 
-local Shared = ReplicatedStorage:WaitForChild("Shared")
-local WorldRemotes = ReplicatedStorage:WaitForChild("WorldRemotes")
--- Remote lama (versi game sebelum ByteNet). Hanya dipakai kalau fungsi baru tidak ada.
-local SetTileRemote = WorldRemotes:FindFirstChild("SetTile")
+local WorldRemotes = ReplicatedStorage:FindFirstChild("WorldRemotes")
+local SetTileRemote = WorldRemotes and WorldRemotes:FindFirstChild("SetTile")
 
-local ItemDB = require(Shared.ItemDB)
-local InventoryModule = require(Shared.Inventory)
-local NetOk, Net = pcall(require, Shared.Net)
+-- 2. Bungkus require dengan pcall dan pengecekan nil
+local ItemDB = {}
+local InventoryModule = nil
+local NetOk, Net = false, nil
+
+if Shared then
+    if Shared:FindFirstChild("ItemDB") then
+        local ok, mod = pcall(require, Shared.ItemDB)
+        if ok and type(mod) == "table" then ItemDB = mod end
+    end
+    if Shared:FindFirstChild("Inventory") then
+        local ok, mod = pcall(require, Shared.Inventory)
+        if ok then InventoryModule = mod end
+    end
+    if Shared:FindFirstChild("Net") then
+        NetOk, Net = pcall(require, Shared.Net)
+    end
+end
 
 local GameGui = PlayerGui:WaitForChild("GameGui")
 local ParticlesOk, ParticlesModule = pcall(require, GameGui:WaitForChild("Particles"))
 local MenuModOk, MenuModule = pcall(require, GameGui:WaitForChild("WorldMenu"))
-local RolesOk, RolesModule = pcall(require, Shared:FindFirstChild("Roles"))
-local SfxOk, SfxModule = pcall(require, Shared:FindFirstChild("Sfx"))
+
+-- 3. Amankan Roles & Sfx agar tidak error jika Shared nil
+local RolesOk, RolesModule = false, nil
+local SfxOk, SfxModule = false, nil
+if Shared then
+    RolesOk, RolesModule = pcall(require, Shared:FindFirstChild("Roles"))
+    SfxOk, SfxModule = pcall(require, Shared:FindFirstChild("Sfx"))
+end
 
 local WindUI
 do
@@ -1384,6 +1407,23 @@ local function isPunchFn(fn)
     return Refs.constHas(consts, Refs.PUNCH_TEXT) and Refs.constHas(consts, Refs.PUNCH_MARK)
 end
 
+-- Fungsi untuk mencuri ItemDB dari upvalue fungsi Punch
+local function stealItemDB(punchFn)
+    local gu = debug.getupvalue
+    if not gu then return nil end
+    for i = 1, 15 do
+        local ok, val = pcall(gu, punchFn, i)
+        if ok and type(val) == "table" then
+            -- Cek apakah tabel ini mirip ItemDB (ada ID angka, dan isinya ada "hits")
+            local firstKey = next(val)
+            if type(firstKey) == "number" and val[firstKey] and val[firstKey].hits then
+                return val -- Dapat! Tanpa butuh folder Shared.
+            end
+        end
+    end
+    return nil
+end
+
 -- Diagnosa: cetak fungsi yang punya kata "crack" / "vending" / "harvest" di konstantanya.
 -- Jalankan sekali: tekan 'Hubungkan ke game' lalu lihat console. Kirim hasilnya kalau masih TIDAK.
 function Refs.debugPunch()
@@ -1558,6 +1598,28 @@ local function findRefs()
     if not Refs.Punch then
         task.spawn(function() pcall(Refs.debugPunch) end)
     end
+
+    -- ===== POIN 2: Curi ItemDB dari Upvalue Punch =====
+    if Refs.Punch and not next(ItemDB) then
+        local stolenDB = stealItemDB(Refs.Punch)
+        if stolenDB then 
+            ItemDB = stolenDB 
+            print("[Ryss Speed] ItemDB berhasil dicuri dari fungsi Punch!")
+        end
+    end
+
+    -- ===== POIN 4: Bypass Net (ByteNet) via getgc =====
+    if not NetOk and getgc then
+        for _, v in ipairs(getgc(true)) do
+            if type(v) == "table" and type(rawget(v, "tile")) == "table" and type(rawget(v, "act")) == "table" then
+                Net = v
+                NetOk = true
+                print("[Ryss Speed] Modul Net (ByteNet) berhasil ditemukan di memori!")
+                break
+            end
+        end
+    end
+
     return Refs.World ~= nil
 end
 
