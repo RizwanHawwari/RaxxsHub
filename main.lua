@@ -7,6 +7,176 @@ end
 local Session = {}
 Session.Build = "2026-11-10-name-and-farm-routing-1"
 G.__n4thOpus = Session
+
+-- >>> TRACKER INVENTORI START <<<
+-- Tracker sementara untuk mencari penyebab bug "angka inventori macet".
+-- Hapus blok ini (atau set Tracker.Enabled = false) setelah bug ketemu.
+local Tracker = {
+    Enabled = true,
+    WatchIds = {},          -- [id] = true, id yang dipantau (diisi otomatis dari State.SelectedId / Pabrik.BlockId)
+    T0 = os.clock(),
+    Events = {},            -- daftar event terbaru (maks 5000)
+    LastSnap = nil,         -- snapshot terakhir
+    DriftLog = {},          -- daftar drift yang terdeteksi
+    File = nil,             -- path file log
+    WriteAt = 0,
+    MaxEvents = 5000,
+}
+getgenv().__n4thTracker = Tracker
+
+-- Tulis file log (kalau executor dukung)
+do
+    local ok = pcall(function()
+        if type(writefile) == "function" and type(makefolder) == "function" and type(isfolder) == "function" then
+            if not isfolder("n4thOpus") then makefolder("n4thOpus") end
+            Tracker.File = "n4thOpus/tracker_" .. tostring(game:GetService("Players").LocalPlayer.UserId) .. ".log"
+            return true
+        end
+    end)
+    Tracker.CanFile = ok == true and Tracker.File ~= nil
+end
+
+function Tracker.now()
+    return string.format("%.3f", os.clock() - Tracker.T0)
+end
+
+function Tracker.log(kind, text)
+    if not Tracker.Enabled then return end
+    local entry = ("[%s] %s %s"):format(Tracker.now(), kind, text)
+    table.insert(Tracker.Events, entry)
+    if #Tracker.Events > Tracker.MaxEvents then table.remove(Tracker.Events, 1) end
+end
+
+function Tracker.drift(text)
+    if not Tracker.Enabled then return end
+    local entry = ("[%s] DRIFT %s"):format(Tracker.now(), text)
+    table.insert(Tracker.DriftLog, entry)
+    if #Tracker.DriftLog > 500 then table.remove(Tracker.DriftLog, 1) end
+    Tracker.log("DRIFT", text)
+    -- print juga supaya kelihatan di console realtime
+    print("[TRACKER] " .. entry)
+end
+
+-- Catat aksi script (dipanggil manual dari fungsi-fungsi penting)
+function Tracker.action(name, id, n)
+    if not Tracker.Enabled then return end
+    Tracker.log("ACTION", ("%s id=%s n=%s"):format(name, tostring(id), tostring(n)))
+end
+
+-- Bungkus fungsi Refs.Inv:add / remove supaya setiap panggilan tercatat
+function Tracker.wrapInv(inv)
+    if not inv or Tracker.Wrapped then return end
+    Tracker.Wrapped = true
+    local origAdd = rawget(inv, "add")
+    local origRemove = rawget(inv, "remove")
+    if type(origAdd) == "function" then
+        inv.add = function(self, id, n, ...)
+            Tracker.log("INV.add", ("id=%s n=%s"):format(tostring(id), tostring(n)))
+            return origAdd(self, id, n, ...)
+        end
+    end
+    if type(origRemove) == "function" then
+        inv.remove = function(self, id, n, ...)
+            Tracker.log("INV.remove", ("id=%s n=%s"):format(tostring(id), tostring(n)))
+            return origRemove(self, id, n, ...)
+        end
+    end
+end
+
+-- Snapshot: baca count untuk id yang dipantau + total slot + total semua item
+function Tracker.snapshot()
+    if not Tracker.Enabled then return end
+    local inv = Refs and Refs.Inv
+    if not inv then return end
+    local snap = { t = os.clock(), counts = {}, slots = 0, totalItems = 0, used = 0 }
+    local okS, slots = pcall(function() return inv.slots end)
+    if okS and type(slots) == "table" then
+        for _, slot in pairs(slots) do
+            if type(slot) == "table" and type(slot.id) == "number" and type(slot.n) == "number" then
+                snap.slots += 1
+                snap.totalItems += slot.n
+                for id in pairs(Tracker.WatchIds) do
+                    if slot.id == id then
+                        snap.counts[id] = (snap.counts[id] or 0) + slot.n
+                    end
+                end
+            end
+        end
+    end
+    local okU, used = pcall(function() return inv:used() end)
+    if okU and type(used) == "number" then snap.used = used end
+    -- deteksi drift: count turun tanpa aksi remove, atau naik tanpa aksi add
+    local prev = Tracker.LastSnap
+    if prev then
+        for id, n in pairs(snap.counts) do
+            local p = prev.counts[id] or 0
+            if n ~= p then
+                local delta = n - p
+                -- cek apakah ada ACTION dengan id sama dalam 2 detik terakhir
+                local matched = false
+                for i = #Tracker.Events, math.max(1, #Tracker.Events - 30), -1 do
+                    local e = Tracker.Events[i]
+                    if e:find("ACTION", 1, true) and e:find("id=" .. tostring(id), 1, true) then
+                        matched = true
+                        break
+                    end
+                end
+                if not matched and math.abs(delta) > 0 then
+                    Tracker.drift(("id=%d count %d -> %d (delta %+d) tanpa aksi tercatat")
+                        :format(id, p, n, delta))
+                end
+            end
+        end
+    end
+    Tracker.LastSnap = snap
+    return snap
+end
+
+-- Tulis log ke file tiap 5 detik
+function Tracker.flush()
+    if not (Tracker.Enabled and Tracker.CanFile) then return end
+    local now = os.clock()
+    if now - Tracker.WriteAt < 5 then return end
+    Tracker.WriteAt = now
+    local lines = {
+        ("=== TRACKER LOG t=%.3f ==="):format(now - Tracker.T0),
+        ("WatchIds: %s"):format((function()
+            local t = {}
+            for id in pairs(Tracker.WatchIds) do t[#t + 1] = tostring(id) end
+            return table.concat(t, ",")
+        end)()),
+        ("Drift count: %d"):format(#Tracker.DriftLog),
+        "--- Drift ---",
+    }
+    for _, d in ipairs(Tracker.DriftLog) do lines[#lines + 1] = d end
+    lines[#lines + 1] = "--- Events (terbaru) ---"
+    for i = math.max(1, #Tracker.Events - 500), #Tracker.Events do
+        lines[#lines + 1] = Tracker.Events[i]
+    end
+    local ok = pcall(writefile, Tracker.File, table.concat(lines, "\n"))
+    if not ok then Tracker.CanFile = false end
+end
+
+-- Loop snapshot tiap 0.5 detik
+task.spawn(function()
+    while Tracker.Enabled and (getgenv and getgenv().__n4thOpus == Session) do
+        pcall(Tracker.snapshot)
+        pcall(Tracker.flush)
+        task.wait(0.5)
+    end
+end)
+
+-- Daftarkan id yang dipantau: block pabrik & seed pabrik
+task.spawn(function()
+    while Tracker.Enabled and (getgenv and getgenv().__n4thOpus == Session) do
+        if Pabrik and Pabrik.BlockId then Tracker.WatchIds[Pabrik.BlockId] = true end
+        if Pabrik and Pabrik.SeedId then Tracker.WatchIds[Pabrik.SeedId] = true end
+        if State and State.SelectedId then Tracker.WatchIds[State.SelectedId] = true end
+        task.wait(2)
+    end
+end)
+-- >>> TRACKER INVENTORI END <<<
+
 local function alive()
     return G.__n4thOpus == Session
 end
@@ -2448,6 +2618,34 @@ local function watchInventory()
         end)
         table.insert(Connections, invConn)
     end
+     -- >>> TRACKER: hook changed event
+    if Tracker and Tracker.Enabled and invConn then
+        local origChanged = invConn
+        -- ganti koneksi dengan yang mencatat argumen
+        pcall(function() origChanged:Disconnect() end)
+        invConn = Refs.Inv.changed.Event:Connect(function(...)
+            local args = {...}
+            if Tracker.Enabled then
+                local parts = {}
+                for i = 1, math.min(#args, 4) do
+                    local v = args[i]
+                    local t = type(v)
+                    if t == "table" then
+                        parts[#parts + 1] = "table(" .. tostring(#v) .. ")"
+                    elseif t == "Instance" then
+                        parts[#parts + 1] = v.ClassName
+                    else
+                        parts[#parts + 1] = tostring(v):sub(1, 40)
+                    end
+                end
+                Tracker.log("CHANGED", ("args=%d %s"):format(#args, table.concat(parts, " ")))
+            end
+            if alive() then refreshInvDropdown(false) end
+        end)
+        table.insert(Connections, invConn)
+    end
+    -- >>> TRACKER END
+    if Tracker then Tracker.wrapInv(Refs.Inv) end
 end
 
 ---------------------------------------------------------------------
@@ -2586,6 +2784,7 @@ local function tryPlace(x, y)
     HitCount[key] = nil
     PlacedAt[key] = os.clock()
     State.Placed += 1
+    if Tracker then Tracker.action("place", sel, 1) end
     State.LastAction = "Place " .. itemName(sel) .. " (" .. x .. "," .. y .. ")"
     return "place"
 end
@@ -2937,6 +3136,7 @@ local function takeDrop(d)
     end
     Drops.applyTaken(d, math.max(0, (d.n or 0) - taken)) -- kurangi / hapus drop seperti game
     State.Collected += taken
+    if Tracker then Tracker.action("takeDrop", d.id, taken) end
     Stats.Items[d.id] = (Stats.Items[d.id] or 0) + taken
     State.LastAction = "Collect " .. itemName(d.id) .. " x" .. taken
     return true
@@ -5658,6 +5858,7 @@ local function plantSeed(x, y)
     sendSetTile("fg", x, y, id)
     if Refs.Inv then pcall(function() Refs.Inv:remove(id, 1) end) end
     FC.onPlant()
+    if Tracker then Tracker.action("plant", id, 1) end
     FC.status("Tanam " .. itemName(id) .. " (" .. x .. "," .. y .. ")")
     return true
 end
@@ -6082,6 +6283,7 @@ local function spliceOnce(x, y)
         pcall(function() Refs.Inv:remove(Splice.B, 1) end)
         if Refs.SetTile then pcall(Refs.SetTile, "fg", x, y, made, true) end -- ganti di layar saja
         Splice.Made += 1
+        if Tracker then Tracker.action("splice", Splice.B, 1) end
         Splice.Status = ("Splice jadi %s (%d,%d)"):format(itemName(made), x, y)
         return true
     end
@@ -6617,6 +6819,7 @@ local function dropItems(id, n, live, allowFlip)
             return n - left, "tidak bisa drop di posisi ini"
         end
     end
+    if Tracker then Tracker.action("drop", id, n - left) end
     return n - left, nil
 end
 
