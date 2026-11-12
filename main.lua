@@ -761,11 +761,17 @@ local Pabrik = {
     Running = false,
     SeedId = nil,
     BlockId = nil,
-    -- >>> AMBIL BLOCK START <<<
+-- >>> AMBIL BLOCK START <<<
     AmbilOn = false,
     AmbilX = -1, AmbilY = -1,
     AmbilStopAt = 80,
     -- >>> AMBIL BLOCK END <<<
+    -- >>> STUCK SEED DROP START <<<
+    StuckDropOn = false,       -- drop seed saat tanam macet (tidak ada tile)
+    StuckDropX = -1, StuckDropY = -1,  -- titik drop (posisi karakter)
+    StuckDropAt = 150,         -- drop kalau seed di tas >= ini
+    StuckKeep = 0,             -- seed yang disisakan setelah drop
+    -- >>> STUCK SEED DROP END <<<
     WholeWorld = false,  -- tanam & panen di seluruh world (bukan hanya lahan)
     Tiles = {},          -- tile break, relatif ke posisi break ("dx,dy")
     BreakX = -1, BreakY = -1,
@@ -1952,6 +1958,9 @@ Config.add("Pabrik", Pabrik, {
     -- >>> AMBIL BLOCK START <<<
     "AmbilOn", "AmbilX", "AmbilY", "AmbilStopAt",
     -- >>> AMBIL BLOCK END <<<
+    -- >>> STUCK SEED DROP START <<<
+    "StuckDropOn", "StuckDropX", "StuckDropY", "StuckDropAt", "StuckKeep",
+    -- >>> STUCK SEED DROP END <<<
 })
 Config.add("Bahasa", I18N, { "Saved", "Ask", "Chosen" })
 do
@@ -7450,6 +7459,25 @@ local function breakReady()
     return Pabrik.BreakX >= 0 and next(Pabrik.Tiles) ~= nil and os.clock() >= (Pabrik.BreakFailUntil or 0)
 end
 
+-- >>> STUCK SEED DROP START <<<
+-- Drop seed ke titik tetap (StuckDropX/StuckDropY) memakai jalur drop trip Pabrik.
+-- Menggunakan Pabrik.DropWorld / DropX/DropY yang sudah ada (tab Titik Drop bersama).
+local function stuckDropSeed(o, n)
+    local seed = o.seed
+    if not seed then return false, "seed tidak ada" end
+    Pabrik.Status = ("Tidak ada tile tanam, drop %s x%d"):format(itemName(seed), n)
+    local items = { { id = seed, n = n } }
+    local ok, why = dropTrip(items, o.live, function(t) Pabrik.Status = t end)
+    Pabrik.Dropped += items[1].got or 0
+    if items[1].got and items[1].got > 0 then
+        notify("Pabrik", ("Drop %s x%d (tanam macet)"):format(itemName(seed), items[1].got), 4)
+        Hook.send("pabrik", ("Pabrik: drop %s x%d karena tidak ada tile tanam"):format(itemName(seed), items[1].got))
+        return true, nil
+    end
+    return false, why or "tidak ada yang ter-drop"
+end
+-- >>> STUCK SEED DROP END <<<
+
 -- 1 langkah pabrik. o = { seed, block, drop, breakMode, whole, exclude, live, phase }
 -- Hasil: "drop" | "work" | "move" | "wait" | "break" | "next" | "idle" (+ detik ke pohon siap)
 local function pabrikStep(o)
@@ -7489,12 +7517,32 @@ local function pabrikStep(o)
         return r
     end
 
-    if o.phase == "tanam" then
+        if o.phase == "tanam" then
         if seeds > 0 then
             FC = pabrikCfg(o, false, true)
             local r = fieldStep()
             if r ~= "idle" then return r end
         end
+        -- >>> STUCK SEED DROP START <<<
+        -- Tidak ada tile untuk menanam & seed menumpuk: drop seed dulu, baru lanjut.
+        if Pabrik.StuckDropOn and seeds >= (Pabrik.StuckDropAt or 150)
+            and Pabrik.StuckDropX >= 0 and os.clock() >= (Pabrik.StuckDropUntil or 0) then
+            local dropN = math.max(0, seeds - (Pabrik.StuckKeep or 0))
+            if dropN > 0 then
+                local ok, why = stuckDropSeed(o, dropN)
+                if ok then
+                    o.phase = "tanam"  -- ulangi tanam setelah drop
+                    return "next"
+                elseif why == "home" then
+                    if Pabrik.stop then Pabrik.stop("Gagal pulang ke world pabrik") end
+                    return "stop"
+                else
+                    Pabrik.StuckDropUntil = os.clock() + 120
+                    Pabrik.Status = "Drop seed gagal: " .. tostring(why)
+                end
+            end
+        end
+        -- >>> STUCK SEED DROP END <<<
         o.phase = "break"
         return "next"
     end
@@ -13206,6 +13254,9 @@ do (function()
     -- >>> AMBIL BLOCK START <<<
     local pAmbil = box(PTab, "Ambil Block (Opsional)", false)
     -- >>> AMBIL BLOCK END <<<
+    -- >>> STUCK SEED DROP START <<<
+    local pStuck = box(PTab, "Drop Seed saat Tanam Macet", false)
+    -- >>> STUCK SEED DROP END <<<
     local pDrop = box(PTab, "Drop seed", true)
 
     safe(function()
@@ -13345,19 +13396,66 @@ do (function()
     })
     -- >>> AMBIL BLOCK END <<<
 
+        -- >>> STUCK SEED DROP START <<<
+    safe(function()
+        UI.PabrikStuckToggle = pStuck:Toggle({
+            Title = "Drop seed saat tidak ada tile tanam",
+            Desc = "Kalau fase tanam macet & seed menumpuk, drop seed ke titik drop bersama (tab Titik Drop) lalu lanjut tanam lagi.",
+            Value = Pabrik.StuckDropOn,
+            Callback = function(on)
+                Pabrik.StuckDropOn = on
+                if on and not Pabrik.pointSet() then
+                    notify("Pabrik", "Atur Titik Drop bersama dulu di tab Auto Drop → Titik drop bersama.", 5)
+                end
+            end,
+        })
+    end)
+
+    addNumber(pStuck, {
+        Title = "Drop kalau seed di tas >=",
+        Desc = "Contoh 150 = drop saat seed mencapai 150.",
+        Min = 20, Max = 200, Step = 5, Default = Pabrik.StuckDropAt or 150,
+        Callback = function(v) Pabrik.StuckDropAt = math.floor(v) end,
+    })
+
+    addNumber(pStuck, {
+        Title = "Sisakan seed setelah drop",
+        Desc = "Seed yang tidak ikut di-drop (untuk ditanam nanti).",
+        Min = 0, Max = 100, Step = 5, Default = Pabrik.StuckKeep or 0,
+        Callback = function(v) Pabrik.StuckKeep = math.floor(v) end,
+    })
+    -- >>> STUCK SEED DROP END <<<
+
     task.spawn(function()
         while alive() do
             local seed, block = Pabrik.SeedId, Auto.blockOfSeed(Pabrik.SeedId)
             local name, door = Auto.parseDropTarget()
             local dropAt = (name ~= "" and name or "world ini") .. (door and (" pintu " .. door) or "")
                 .. (Pabrik.DropX >= 0 and (" (" .. Pabrik.DropX .. "," .. Pabrik.DropY .. ")") or "")
-                        -- >>> AMBIL BLOCK START <<<
+            -- >>> AMBIL BLOCK START <<<
             local ambilLine = ("Ambil  : %s | titik %s | sisa block %d | stop di %d"):format(
                 Pabrik.AmbilOn and "AKTIF" or "mati",
                 (Pabrik.AmbilX >= 0) and ("(" .. Pabrik.AmbilX .. "," .. Pabrik.AmbilY .. ")") or "belum diatur",
                 Pabrik.AmbilOn and ambilRemaining() or 0,
                 Pabrik.AmbilStopAt or 80)
             -- >>> AMBIL BLOCK END <<<
+            -- >>> STUCK SEED DROP START <<<
+            local stuckLine = ("Drop Macet: %s | drop saat seed >= %d | sisakan %d"):format(
+                Pabrik.StuckDropOn and "AKTIF" or "mati",
+                Pabrik.StuckDropAt or 150, Pabrik.StuckKeep or 0)
+            -- >>> STUCK SEED DROP END <<<
+            local txt = table.concat({
+                "Status : " .. (Pabrik.Running and ("JALAN - fase " .. tostring(Pabrik.Phase or "-")) or "BERHENTI"),
+                ("Seed   : %s x%d | block %s x%d"):format(seed and itemName(seed) or "-", seed and invCount(seed) or 0,
+                    block and itemName(block) or "-", block and invCount(block) or 0),
+                ("Break  : %s | tile %d"):format(Pabrik.BreakX >= 0 and ("(" .. Pabrik.BreakX .. "," .. Pabrik.BreakY .. ")")
+                    or "belum diatur", countKeys(Pabrik.Tiles)),
+                ambilLine,
+                stuckLine, -- >>> STUCK SEED DROP <<<
+                ("Drop   : %s | sisakan %d, drop saat >= %d"):format(Pabrik.Drop and dropAt or "mati", Pabrik.Keep, Pabrik.DropAt),
+                ("Hasil  : panen %d | tanam %d | di-drop %d"):format(Pabrik.Harvested, Pabrik.Planted, Pabrik.Dropped),
+                "Aksi   : " .. Pabrik.Status,
+            }, "\n")
             local txt = table.concat({
                 "Status : " .. (Pabrik.Running and ("JALAN - fase " .. tostring(Pabrik.Phase or "-")) or "BERHENTI"),
                 ("Seed   : %s x%d | block %s x%d"):format(seed and itemName(seed) or "-", seed and invCount(seed) or 0,
