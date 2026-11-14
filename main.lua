@@ -2636,6 +2636,30 @@ local function sendHitFx(x, y)
     end
 end
 
+-- >>> DEBUG PUNCH START <<<
+Session.PunchLog = Session.PunchLog or {}
+function Session.logPunch(tag, data)
+    local line = ("[%s] %s"):format(tag, tostring(data))
+    table.insert(Session.PunchLog, line)
+    if #Session.PunchLog > 500 then table.remove(Session.PunchLog, 1) end
+    print("[n4th-debug] " .. line)
+end
+
+function Session.dumpPunch()
+    warn("===== PUNCH DEBUG DUMP =====")
+    warn("Refs.Punch: " .. tostring(Refs.Punch))
+    warn("Refs.SetTile: " .. tostring(Refs.SetTile))
+    if Refs.Punch then
+        local c = getconsts(Refs.Punch)
+        local parts = {}
+        for i, v in pairs(c) do parts[#parts + 1] = tostring(i) .. "=" .. tostring(v) end
+        warn("Punch constants: " .. table.concat(parts, " | "):sub(1, 1500))
+    end
+    for _, l in ipairs(Session.PunchLog) do warn(l) end
+    warn("===== END DUMP =====")
+end
+-- >>> DEBUG PUNCH END <<<
+
 local function hitsNeeded(id)
     if State.HitsOverride > 0 then return State.HitsOverride end
     local it = ItemDB[id]
@@ -2724,14 +2748,22 @@ local function tryBreak(x, y, includeBg, onlyId, allowHit)
             if not ok or on then return nil end
         end
     end
-    if Refs.Punch then
+        if Refs.Punch then
         local ok, err = pcall(Refs.Punch, x, y, State.MutePunch or nil, nil)
+        -- >>> DEBUG PUNCH <<<
+        Session.logPunch("PUNCH", ("ok=%s err=%s target=(%d,%d) id=%s layer=%s"):format(
+            tostring(ok), tostring(err), x, y, tostring(id), tostring(layer)))
+        -- >>> DEBUG PUNCH END <<<
         if not ok then
             State.LastAction = "Error pukul: " .. tostring(err)
             return nil
         end
         if State.Visual then Anim.swing(x, y, "punch") end
-        if tileAt(layer, x, y) ~= id then
+        local nowId = tileAt(layer, x, y)
+        -- >>> DEBUG PUNCH <<<
+        Session.logPunch("TILE", ("(%d,%d) before=%s after=%s"):format(x, y, tostring(id), tostring(nowId)))
+        -- >>> DEBUG PUNCH END <<<
+        if nowId ~= id then
             Drops.brokeAt[key] = os.clock()
             State.Broken += 1
             State.LastAction = "Break " .. itemName(id) .. " (" .. x .. "," .. y .. ")"
@@ -2740,6 +2772,10 @@ local function tryBreak(x, y, includeBg, onlyId, allowHit)
         State.LastAction = "Pukul " .. itemName(id) .. " (" .. x .. "," .. y .. ")"
         return "hit"
     end
+
+    -- >>> DEBUG PUNCH <<<
+    Session.logPunch("FALLBACK", ("Refs.Punch nil, target=(%d,%d) id=%s"):format(x, y, tostring(id)))
+    -- >>> DEBUG PUNCH END <<<
 
     -- Cadangan: hitung pukulan sendiri
     local hc = HitCount[key]
@@ -14504,6 +14540,14 @@ safe(function()
         Callback = function()
             UI.later("reconnect", function() reconnect("Koneksi") end)
         end,
+    })
+end)
+
+safe(function()
+    Box.ConnMain:Button({
+        Title = "Dump debug pukulan",
+        Desc = "Cetak log pukulan terakhir ke console (untuk laporan)",
+        Callback = function() Session.dumpPunch() end,
     })
 end)
 
