@@ -2879,6 +2879,97 @@ function Session.findPunchCandidates()
 end
 -- >>> DEBUG PUNCH FINDER END <<<
 
+-- >>> DEBUG PUNCH DEEP START <<<
+function Session.findPunchDeep()
+    if Session.consoleShow then Session.consoleShow() end
+    local out = Session.consolePrint or function(t) print("[n4th-debug] " .. t) end
+    out("===== PUNCH DEEP =====")
+    if not Refs.World then out("Refs.World nil") return end
+    local w = Refs.World
+
+    local function describe(label, fn)
+        out(label .. ": " .. tostring(fn))
+        local ok, consts = pcall(getconsts, fn)
+        if ok then
+            local parts = {}
+            for i, v in pairs(consts) do parts[#parts + 1] = tostring(i) .. "=" .. tostring(v) end
+            out("  consts: " .. table.concat(parts, " | "):sub(1, 1200))
+        end
+        local ups = getUpvalues(fn)
+        for i, v in pairs(ups) do
+            local tv = type(v)
+            local extra = ""
+            if tv == "table" then
+                if rawequal(v, w) then
+                    extra = " <-- World"
+                else
+                    local n = 0
+                    for _ in pairs(v) do n += 1 if n > 6 then break end end
+                    local keys = {}
+                    local cnt = 0
+                    for k, val in pairs(v) do
+                        keys[#keys + 1] = tostring(k) .. ":" .. type(val)
+                        cnt += 1
+                        if cnt >= 6 then break end
+                    end
+                    extra = " {" .. table.concat(keys, ", ") .. "} (total " .. n .. ")"
+                end
+            elseif tv == "function" then
+                local okc, c = pcall(getconsts, v)
+                if okc and type(c) == "table" then
+                    local small = {}
+                    for _, cv in pairs(c) do
+                        if type(cv) == "string" then small[#small + 1] = cv end
+                        if #small >= 6 then break end
+                    end
+                    extra = " fn[" .. table.concat(small, ",") .. "]"
+                end
+            elseif tv == "string" then
+                extra = " = " .. tostring(v):sub(1, 40)
+            elseif tv == "number" or tv == "boolean" then
+                extra = " = " .. tostring(v)
+            end
+            out(("  up %d (%s)%s"):format(i, tv, extra))
+        end
+    end
+
+    if type(w.punchFire) == "function" then describe("World.punchFire", w.punchFire) end
+    if type(w.punchEvent) == "function" then describe("World.punchEvent", w.punchEvent) end
+    if type(w.raymanOn) == "function" then describe("World.raymanOn", w.raymanOn) end
+    if type(w.newCrack) == "function" then describe("World.newCrack", w.newCrack) end
+    if type(w.breakTileGone) == "function" then describe("World.breakTileGone", w.breakTileGone) end
+
+    -- cari fungsi di World yang upvalue-nya punya World + tabel berisi angka besar (fg / hits)
+    out("-- fungsi World yang memegang World + tabel besar --")
+    for k, v in pairs(w) do
+        if type(v) == "function" and k ~= "punchFire" and k ~= "punchEvent" then
+            local ups = getUpvalues(v)
+            local hasW = false
+            local bigTables = 0
+            for _, uv in pairs(ups) do
+                if rawequal(uv, w) then hasW = true
+                elseif type(uv) == "table" then
+                    local n = 0
+                    for _ in pairs(uv) do n += 1 if n > 30 then break end end
+                    if n > 30 then bigTables += 1 end
+                end
+            end
+            if hasW and bigTables >= 1 then
+                local c = getconsts(v)
+                local strs = {}
+                for _, cv in pairs(c) do
+                    if type(cv) == "string" then strs[#strs + 1] = cv end
+                end
+                out(("  World.%s  ups=%d bigTables=%d  strings=%s"):format(
+                    tostring(k), #ups, bigTables, table.concat(strs, ","):sub(1, 200)))
+            end
+        end
+    end
+
+    out("===== END DEEP =====")
+end
+-- >>> DEBUG PUNCH DEEP END <<<
+
 local function hitsNeeded(id)
     if State.HitsOverride > 0 then return State.HitsOverride end
     local it = ItemDB[id]
@@ -14764,9 +14855,9 @@ end)
 
 safe(function()
     Box.ConnMain:Button({
-        Title = "Cari kandidat fungsi pukul",
-        Desc = "Cetak fungsi-fungsi yang mirip punch ke console (untuk analisis update game)",
-        Callback = function() Session.findPunchCandidates() end,
+        Title = "Deep dump fungsi pukul",
+        Desc = "Cetak detail upvalue punchFire/punchEvent + kandidat dari World",
+        Callback = function() Session.findPunchDeep() end,
     })
 end)
 
