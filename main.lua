@@ -14764,14 +14764,6 @@ end)
 
 safe(function()
     Box.ConnMain:Button({
-        Title = "Dump debug pukulan",
-        Desc = "Cetak log pukulan terakhir ke console (untuk laporan)",
-        Callback = function() Session.dumpPunch() end,
-    })
-end)
-
-safe(function()
-    Box.ConnMain:Button({
         Title = "Cari kandidat fungsi pukul",
         Desc = "Cetak fungsi-fungsi yang mirip punch ke console (untuk analisis update game)",
         Callback = function() Session.findPunchCandidates() end,
