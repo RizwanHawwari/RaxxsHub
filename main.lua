@@ -913,6 +913,138 @@ UI.Palette = {
     Action = Color3.fromHex("AA2944"),
     Stop = Color3.fromHex("702430"),
 }
+-- >>> DEBUG CONSOLE START <<<
+do
+    local parent
+    if type(gethui) == "function" then
+        local ok, p = pcall(gethui)
+        if ok and typeof(p) == "Instance" then parent = p end
+    end
+    parent = parent or game:GetService("CoreGui")
+
+    local sg = Instance.new("ScreenGui")
+    sg.Name = "n4thDebugConsole"
+    sg.ResetOnSpawn = false
+    sg.IgnoreGuiInset = true
+    sg.DisplayOrder = 10000
+    sg.Enabled = false
+    pcall(function() sg.Parent = parent end)
+
+    local frame = Instance.new("Frame")
+    frame.Size = UDim2.fromOffset(560, 320)
+    frame.Position = UDim2.new(0, 20, 1, -340)
+    frame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+    frame.BorderSizePixel = 0
+    frame.Parent = sg
+    Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 8)
+
+    local title = Instance.new("TextLabel")
+    title.Size = UDim2.new(1, -80, 0, 26)
+    title.Position = UDim2.fromOffset(10, 2)
+    title.BackgroundTransparency = 1
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 13
+    title.TextColor3 = Color3.fromRGB(255, 200, 200)
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "n4th Debug Console"
+    title.Parent = frame
+
+    local close = Instance.new("TextButton")
+    close.Size = UDim2.fromOffset(24, 24)
+    close.Position = UDim2.new(1, -32, 0, 4)
+    close.BackgroundColor3 = Color3.fromRGB(180, 60, 60)
+    close.Text = "X"
+    close.Font = Enum.Font.GothamBold
+    close.TextSize = 12
+    close.TextColor3 = Color3.new(1, 1, 1)
+    close.Parent = frame
+    Instance.new("UICorner", close).CornerRadius = UDim.new(0, 4)
+    close.MouseButton1Click:Connect(function() sg.Enabled = false end)
+
+    local copy = Instance.new("TextButton")
+    copy.Size = UDim2.fromOffset(56, 22)
+    copy.Position = UDim2.new(1, -94, 0, 5)
+    copy.BackgroundColor3 = Color3.fromRGB(60, 120, 200)
+    copy.Text = "Copy"
+    copy.Font = Enum.Font.GothamBold
+    copy.TextSize = 12
+    copy.TextColor3 = Color3.new(1, 1, 1)
+    copy.Parent = frame
+    Instance.new("UICorner", copy).CornerRadius = UDim.new(0, 4)
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, -20, 1, -40)
+    scroll.Position = UDim2.fromOffset(10, 32)
+    scroll.BackgroundColor3 = Color3.fromRGB(8, 8, 12)
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 6
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.Parent = frame
+    Instance.new("UICorner", scroll).CornerRadius = UDim.new(0, 6)
+
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Parent = scroll
+
+    local count = 0
+    local function addLine(text)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -8, 0, 0)
+        lbl.AutomaticSize = Enum.AutomaticSize.Y
+        lbl.BackgroundTransparency = 1
+        lbl.Font = Enum.Font.Code
+        lbl.TextSize = 12
+        lbl.TextColor3 = Color3.fromRGB(230, 230, 230)
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextWrapped = true
+        lbl.Text = tostring(text)
+        lbl.LayoutOrder = count
+        lbl.Parent = scroll
+        count += 1
+        scroll.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 8)
+        -- auto-scroll ke bawah
+        task.defer(function() scroll.CanvasPosition = Vector2.new(0, math.max(0, layout.AbsoluteContentSize.Y)) end)
+    end
+
+    local lines = {}
+    function Session.consoleShow()
+        sg.Enabled = true
+    end
+    function Session.consoleHide()
+        sg.Enabled = false
+    end
+    function Session.consolePrint(text)
+        local line = tostring(text)
+        table.insert(lines, line)
+        if #lines > 2000 then table.remove(lines, 1) end
+        addLine(line)
+        print("[n4th-debug] " .. line)
+    end
+    function Session.consoleClear()
+        lines = {}
+        for _, c in ipairs(scroll:GetChildren()) do
+            if c:IsA("TextLabel") then c:Destroy() end
+        end
+        count = 0
+        scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    end
+    function Session.consoleText()
+        return table.concat(lines, "\n")
+    end
+
+    copy.MouseButton1Click:Connect(function()
+        if type(setclipboard) == "function" then
+            local ok = pcall(setclipboard, Session.consoleText())
+            if ok then
+                copy.Text = "Copied!"
+                task.delay(1.2, function() copy.Text = "Copy" end)
+            else
+                copy.Text = "Gagal"
+            end
+        end
+    end)
+end
+-- >>> DEBUG CONSOLE END <<<
 function UI.tabVisible(title)
     if not UI.Window then return true end
     if UI.Window.Closed then return false end
@@ -2640,23 +2772,25 @@ end
 Session.PunchLog = Session.PunchLog or {}
 function Session.logPunch(tag, data)
     local line = ("[%s] %s"):format(tag, tostring(data))
-    table.insert(Session.PunchLog, line)
-    if #Session.PunchLog > 500 then table.remove(Session.PunchLog, 1) end
-    print("[n4th-debug] " .. line)
+    if Session.consolePrint then Session.consolePrint(line) else print("[n4th-debug] " .. line) end
 end
 
 function Session.dumpPunch()
-    warn("===== PUNCH DEBUG DUMP =====")
-    warn("Refs.Punch: " .. tostring(Refs.Punch))
-    warn("Refs.SetTile: " .. tostring(Refs.SetTile))
+    if Session.consoleShow then Session.consoleShow() end
+    local function out(text)
+        if Session.consolePrint then Session.consolePrint(text) else warn(text) end
+    end
+    out("===== PUNCH DEBUG DUMP =====")
+    out("Refs.Punch: " .. tostring(Refs.Punch))
+    out("Refs.SetTile: " .. tostring(Refs.SetTile))
     if Refs.Punch then
         local c = getconsts(Refs.Punch)
         local parts = {}
         for i, v in pairs(c) do parts[#parts + 1] = tostring(i) .. "=" .. tostring(v) end
-        warn("Punch constants: " .. table.concat(parts, " | "):sub(1, 1500))
+        out("Punch constants: " .. table.concat(parts, " | "):sub(1, 1500))
     end
-    for _, l in ipairs(Session.PunchLog) do warn(l) end
-    warn("===== END DUMP =====")
+    for _, l in ipairs(Session.PunchLog) do out(l) end
+    out("===== END DUMP =====")
 end
 -- >>> DEBUG PUNCH END <<<
 
@@ -14548,6 +14682,16 @@ safe(function()
         Title = "Dump debug pukulan",
         Desc = "Cetak log pukulan terakhir ke console (untuk laporan)",
         Callback = function() Session.dumpPunch() end,
+    })
+end)
+
+safe(function()
+    Box.ConnMain:Button({
+        Title = "Buka Console Debug",
+        Desc = "Tampilkan / sembunyikan console melayang",
+        Callback = function()
+            if Session.consoleShow then Session.consoleShow() end
+        end,
     })
 end)
 
