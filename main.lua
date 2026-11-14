@@ -2794,6 +2794,91 @@ function Session.dumpPunch()
 end
 -- >>> DEBUG PUNCH END <<<
 
+-- >>> DEBUG PUNCH FINDER START <<<
+-- Cari fungsi game yang "mirip" fungsi punch dengan konstanta berbeda,
+-- lalu cetak constants + upvalues-nya untuk analisis.
+function Session.findPunchCandidates()
+    if Session.consoleShow then Session.consoleShow() end
+    local out = Session.consolePrint or function(t) print("[n4th-debug] " .. t) end
+    out("===== CANDIDATE FUNCTIONS =====")
+    if type(getconnections) ~= "function" then
+        out("getconnections tidak tersedia")
+        return
+    end
+    local seen = {}
+    local found = 0
+    local function consider(fn, source)
+        if type(fn) ~= "function" or seen[fn] then return end
+        seen[fn] = true
+        local ok, c = pcall(getconsts, fn)
+        if not ok or type(c) ~= "table" then return end
+        -- cari yang punya string mirip punch atau SetTile
+        local hasPunch, hasCrack, hasVend, hasPlaced, hasFlips = false, false, false, false, false
+        local hasTile = false
+        local strlist = {}
+        for _, v in pairs(c) do
+            if type(v) == "string" then
+                strlist[#strlist + 1] = v
+                local low = v:lower()
+                if low:find("punch", 1, true) or low:find("hit", 1, true) then hasPunch = true end
+                if low:find("crack", 1, true) or low:find("harvest", 1, true) then hasCrack = true end
+                if low:find("vending", 1, true) then hasVend = true end
+                if low:find("placedat", 1, true) then hasPlaced = true end
+                if v == "flips" then hasFlips = true end
+                if v == "tile" or v == "SetTile" then hasTile = true end
+            end
+        end
+        if hasPunch or hasCrack or hasVend or hasPlaced or hasTile then
+            found += 1
+            if found > 20 then return end
+            out(("FUNC %d (%s):"):format(found, source))
+            local preview = {}
+            for i = 1, math.min(#strlist, 25) do preview[#preview + 1] = tostring(strlist[i]) end
+            out("  strings: " .. table.concat(preview, " | "):sub(1, 1200))
+            local ups = getUpvalues(fn)
+            local upInfo = {}
+            for i, v in pairs(ups) do
+                upInfo[#upInfo + 1] = i .. ":" .. type(v)
+            end
+            out("  upvalues: " .. table.concat(upInfo, " "))
+        end
+    end
+    -- 1) semua koneksi RenderStepped / Heartbeat / InputBegan / InputEnded / TouchTap
+    local sources = {
+        { RunService, { "RenderStepped", "Heartbeat", "PreRender", "Stepped" } },
+        { UserInputService, { "InputBegan", "InputEnded", "TouchTap" } },
+    }
+    for _, entry in ipairs(sources) do
+        for _, name in ipairs(entry[2]) do
+            local okS, sig = pcall(function() return entry[1][name] end)
+            if okS and sig then
+                local ok, conns = pcall(getconnections, sig)
+                if ok and type(conns) == "table" then
+                    for _, c in pairs(conns) do
+                        local okf, fn = pcall(Session.connectionFunction, c)
+                        if okf then
+                            consider(fn, name)
+                            -- telusuri upvalue 1 level
+                            for _, u in pairs(getUpvalues(fn)) do
+                                if type(u) == "function" then consider(u, name .. ">upvalue") end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    -- 2) semua fungsi di World (kalau ada)
+    if Refs.World then
+        for k, v in pairs(Refs.World) do
+            if type(v) == "function" then consider(v, "World." .. tostring(k)) end
+        end
+    end
+    out(("Total candidates: %d"):format(found))
+    out("===== END CANDIDATES =====")
+end
+-- >>> DEBUG PUNCH FINDER END <<<
+
 local function hitsNeeded(id)
     if State.HitsOverride > 0 then return State.HitsOverride end
     local it = ItemDB[id]
@@ -14682,6 +14767,14 @@ safe(function()
         Title = "Dump debug pukulan",
         Desc = "Cetak log pukulan terakhir ke console (untuk laporan)",
         Callback = function() Session.dumpPunch() end,
+    })
+end)
+
+safe(function()
+    Box.ConnMain:Button({
+        Title = "Cari kandidat fungsi pukul",
+        Desc = "Cetak fungsi-fungsi yang mirip punch ke console (untuk analisis update game)",
+        Callback = function() Session.findPunchCandidates() end,
     })
 end)
 
