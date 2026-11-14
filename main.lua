@@ -2287,17 +2287,36 @@ end
 
 -- Fungsi pukul game: teks "Empty the Vending Machine first!" + "newCrack"
 -- (game lama: "HarvestProvider")
+-- >>> PUNCH FIX START <<<
+-- Deteksi fungsi pukul tanpa bergantung pada string yang rapuh.
+-- Ciri utama (game baru): konstanta berisi "newCrack" + "hits" + "seed"
+-- Ciri lama: "Empty the Vending Machine first!" + "newCrack"/"HarvestProvider"
 local function isPunchFn(fn)
     if not getconsts then return false end
     local ok, consts = pcall(getconsts, fn)
     if not ok or type(consts) ~= "table" then return false end
-    local hasVend, hasMark = false, false
+    local hasVend, hasCrack, hasHits, hasSeed, hasPlayAt = false, false, false, false, false
+    local hasVending = false
     for _, c in pairs(consts) do
-        if type(c) == "string" and c:lower():find("empty", 1, true) and c:lower():find("vending", 1, true) then hasVend = true
-        elseif c == "newCrack" or c == "HarvestProvider" then hasMark = true end
+        if type(c) == "string" then
+            local low = c:lower()
+            if low:find("empty", 1, true) and low:find("vending", 1, true) then hasVend = true end
+            if low == "empty the machine first: it sells " then hasVending = true end
+            if c == "newCrack" or c == "HarvestProvider" or low:find("newcrack", 1, true) then hasCrack = true end
+            if c == "hits" or c == "staffHits" then hasHits = true end
+            if c == "seed" then hasSeed = true end
+            if c == "playAt" or c == "play" then hasPlayAt = true end
+        end
     end
-    return hasVend and hasMark
+    -- pola baru: crack + hits + seed (paling khas remoteHit)
+    if hasCrack and hasHits and hasSeed then return true end
+    -- pola lama: vend + crack
+    if hasVend and hasCrack then return true end
+    -- pola alternatif: crack + hits + playAt
+    if hasCrack and hasHits and hasPlayAt then return true end
+    return false
 end
+-- >>> PUNCH FIX END <<<
 
 -- Fungsi game yang menggambar tangan karakter saat memukul / memasang
 function Anim.isArmFn(fn)
@@ -2372,6 +2391,24 @@ local function isGameFn(fn)
     end
     return true
 end
+
+-- >>> PUNCH FIX START <<<
+-- Game update: fungsi pukul lama pindah ke World.remoteHit.
+-- Cari langsung dari World (tidak rapuh terhadap perubahan constants).
+local function bindPunchFromWorld()
+    if Refs.Punch then return true end
+    local w = Refs.World
+    if not w then return false end
+    local f = rawget(w, "remoteHit")
+    if type(f) == "function" then
+        Refs.Punch = f
+        print("[n4th] Punch ditemukan via World.remoteHit")
+        return true
+    end
+    return false
+end
+Session.bindPunchFromWorld = bindPunchFromWorld
+-- >>> PUNCH FIX END <<<
 
 function Anim.consider(v, trusted)
     local tv = type(v)
@@ -2464,7 +2501,7 @@ local function refsText()
         .. " | Inventori: " .. (Refs.Inv and "OK" or "TIDAK")
         .. " | setTile: " .. (Refs.SetTile and "OK" or "cadangan")
         .. " | Posisi: " .. (Refs.State and "OK" or "cadangan")
-        .. " | Pukul: " .. (Refs.Punch and "OK" or "TIDAK")
+        .. " | Pukul: " .. (Refs.Punch and "OK" or (Session.bindPunchFromWorld and "remoteHit?" or "TIDAK"))
         .. " | Drop: " .. (Drops.list and "OK" or "TIDAK")
         .. " | Pohon: " .. (Refs.Trees and "OK" or "TIDAK")
         .. " | Pemain: " .. (Refs.Others and "OK" or "TIDAK")
@@ -3177,6 +3214,10 @@ function Anim.quickRefs()
         local value = queue[i]
         i, n = i + 1, n + 1
         Anim.consider(value, true)
+        -- >>> PUNCH FIX: begitu World ketemu, langsung ambil Punch dari World.remoteHit
+        if Refs.World and not Refs.Punch and Session.bindPunchFromWorld then
+            Session.bindPunchFromWorld()
+        end
         if Refs.Inv and Refs.World and Refs.Punch and Refs.SetTile and Refs.State and Refs.Menu then break end
         if type(value) == "function" then
             for _, upvalue in pairs(getUpvalues(value)) do push(upvalue) end
@@ -14825,9 +14866,15 @@ local function reconnect(show)
         pcall(doInvRefresh, true)
         task.wait() -- biar dropdown tampil dulu sebelum scan lengkap (scan menahan layar sebentar)
     end
-    -- 2) scan lengkap
+        -- 2) scan lengkap
     findRefs()
     if Refs.ScanError then warn("[n4th] " .. Refs.ScanError) end
+    -- >>> PUNCH FIX: coba World.remoteHit kalau findRefs gagal deteksi Punch
+    if not Refs.Punch then
+        if Session.bindPunchFromWorld and Session.bindPunchFromWorld() then
+            print("[n4th] Punch ditemukan setelah findRefs (World.remoteHit)")
+        end
+    end
     watchInventory()
     pcall(doInvRefresh, true) -- langsung di thread ini (thread INIT / antrian UI), bukan thread tombol
     findDropRefs(true)
