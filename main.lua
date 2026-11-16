@@ -1008,11 +1008,15 @@ local WorldFinder = {
 local Guard = {
     On = false,
     -- >>> BAN WATCH START <<<
-    BanWatchOn = false,     -- fitur pantau ban
-    BanCount = 0,           -- berapa log ban yang sudah terdeteksi
-    BanLimit = 3,           -- berapa log ban sebelum bot keluar
-    BanLeave = true,        -- keluar world setelah batas tercapai
-    BanLog = {},            -- riwayat log ban (maks 20)
+    BanWatchOn = false,     -- fitur pantau ban/nuke
+    BanCount = 0,           -- berapa log yang sudah terdeteksi (total)
+    BanLimit = 3,           -- berapa log sebelum keluar
+    BanLeave = true,        -- keluar world saat terdeteksi
+    BanCalmMin = 30,        -- menit tanpa log baru sebelum masuk lagi
+    BanLog = {},            -- riwayat log (maks 20)
+    BanMode = "idle",       -- idle | away
+    BanAt = 0,              -- waktu keluar world
+    BanResetAt = 0,         -- waktu log terakhir
     -- >>> BAN WATCH END <<<
     Who = "Staff (Mod/Dev)",   -- "Staff (Mod/Dev)" | "All players"
     StopAll = true,            -- pause all activities
@@ -10006,74 +10010,108 @@ local function worldChannel()
 end
 
 -- >>> BAN WATCH START <<<
--- Dengarkan pesan chat world. Kalau ada pola "banned" (mis. "X have banned Y"),
--- hitung. Kalau mencapai BanLimit -> stop semua aktivitas + keluar world.
+-- Pantau log chat "have banned" / "was nuked" di world. Kalau mencapai Batas:
+--   - keluar world (jeda)
+--   - masuk lagi hanya kalau sudah BanCalmMin menit tanpa log baru
+-- Timer reset setiap ada log baru.
 do
     local function stripColor(s)
         return (tostring(s or ""):gsub("`%d", ""):gsub("`#%x%x%x%x%x%x", ""))
     end
-    local function isBanMessage(text)
+    local function isBanLog(text)
         local low = stripColor(text):lower()
-        -- cocokkan "have banned", "has banned", "was banned", "banned by", "banned!"
         return low:find("have banned", 1, true) ~= nil
             or low:find("has banned", 1, true) ~= nil
             or low:find("was banned", 1, true) ~= nil
             or low:find("banned by", 1, true) ~= nil
+            or low:find("was nuked", 1, true) ~= nil
+            or low:find("were nuked", 1, true) ~= nil
+            or low:find("has nuked", 1, true) ~= nil
+            or low:find("have nuked", 1, true) ~= nil
     end
-    local function onBanMessage(text)
+    local hooked = {}
+    local function onBanLog(text)
         if not Guard.BanWatchOn then return end
         local clean = stripColor(text)
-        if not isBanMessage(clean) then return end
+        if not isBanLog(clean) then return end
         Guard.BanCount += 1
+        Guard.BanResetAt = os.clock()
         table.insert(Guard.BanLog, os.date("%H:%M:%S") .. "  " .. clean:sub(1, 200))
         if #Guard.BanLog > 20 then table.remove(Guard.BanLog, 1) end
-        notify("Ban Watch", ("Log ban terdeteksi (%d/%d): %s"):format(Guard.BanCount, Guard.BanLimit, clean:sub(1, 120)), 4)
+        notify("Ban Watch", ("Log terdeteksi (%d): %s"):format(Guard.BanCount, clean:sub(1, 120)), 4)
         Hook.send("penjaga", "Ban Watch: " .. clean:sub(1, 200))
-        if Guard.BanCount >= Guard.BanLimit then
-            Guard.BanWatchOn = false
-            if UI.BanWatchToggle then pcall(function() UI.BanWatchToggle:Set(false) end) end
-            notify("Ban Watch", ("Batas %d log ban tercapai. Bot berhenti."):format(Guard.BanLimit), 8)
-            Hook.send("penjaga", ("Ban Watch: batas %d log ban tercapai. Bot berhenti."):format(Guard.BanLimit))
-            -- hentikan semua aktivitas lewat Guard.stopAll kalau ada, atau manual
+        if Guard.BanMode == "away" then
+            -- sudah di luar world, reset timer
+            Guard.BanAt = os.clock()
+            return
+        end
+        if Guard.BanCount >= Guard.BanLimit and Guard.BanLeave then
+            Guard.BanMode = "away"
+            Guard.BanAt = os.clock()
+            notify("Ban Watch", ("Batas %d log tercapai. Keluar world, masuk lagi setelah %d menit sepi.")
+                :format(Guard.BanLimit, Guard.BanCalmMin), 8)
+            Hook.send("penjaga", ("Ban Watch: keluar world, tunggu %d menit sepi."):format(Guard.BanCalmMin))
             pcall(function()
                 if Guard.stopAll then Guard.stopAll() end
             end)
             pcall(function()
                 if Auto and Auto.stopWalk then Auto.stopWalk() end
             end)
-            if Guard.BanLeave then
-                pcall(function()
-                    if Guard.leaveWorld then Guard.leaveWorld() end
-                end)
-            end
+            pcall(function()
+                if Guard.leaveWorld then Guard.leaveWorld() end
+            end)
         end
     end
-    -- TextChatService: dengarkan channel world
-    local function hookTextChat()
-        local folder = TextChatService:FindFirstChild("WorldChannels")
-        if not folder then return false end
-        local ch = worldChannel()
-        if not ch then return false end
+    local function hookChannel(ch)
+        if not ch or hooked[ch] then return end
+        hooked[ch] = true
         ch.MessageReceived:Connect(function(message)
             local text = message and message.Text or ""
-            pcall(onBanMessage, text)
+            pcall(onBanLog, text)
         end)
-        return true
     end
-    -- coba hook sekarang, kalau gagal, coba lagi tiap 3 detik
     task.spawn(function()
         while alive() do
-            local ok = pcall(hookTextChat)
-            if ok then break end
-            task.wait(3)
-        end
-        -- juga hook channel baru saat pindah world
-        task.spawn(function()
-            while alive() do
-                task.wait(5)
-                pcall(hookTextChat)
+            if Guard.BanWatchOn then
+                pcall(function()
+                    local folder = TextChatService:FindFirstChild("WorldChannels")
+                    if folder then
+                        local ch = worldChannel()
+                        if ch then hookChannel(ch) end
+                    end
+                end)
+                -- Timer: kalau sudah keluar world dan cukup lama sepi, masuk lagi
+                if Guard.BanMode == "away" then
+                    local elapsed = (os.clock() - Guard.BanAt) / 60
+                    local sinceLog = (os.clock() - Guard.BanResetAt) / 60
+                    local need = math.max(elapsed, sinceLog)
+                    if need >= Guard.BanCalmMin then
+                        -- coba masuk lagi
+                        local world = Guard.Saved and Guard.Saved.world or ""
+                        if world == "" then
+                            world = Guard.worldName and Guard.worldName() or ""
+                        end
+                        if world ~= "" and Guard.enterWorld then
+                            local ok = Guard.enterWorld(world)
+                            if ok then
+                                Guard.BanMode = "idle"
+                                Guard.BanCount = 0
+                                Guard.BanResetAt = os.clock()
+                                notify("Ban Watch", "World sepi. Masuk lagi.", 5)
+                                Hook.send("penjaga", "Ban Watch: masuk lagi ke " .. world)
+                                -- lanjut aktivitas sebelumnya kalau ada
+                                pcall(function()
+                                    if Guard.resumeSaved and Guard.Saved then
+                                        Guard.resumeSaved(Guard.Saved)
+                                    end
+                                end)
+                            end
+                        end
+                    end
+                end
             end
-        end)
+            task.wait(5)
+        end
     end)
 end
 -- >>> BAN WATCH END <<<
@@ -14000,7 +14038,7 @@ end)() end
 
 Config.add("Penjaga", Guard, { "On", "Who", "StopAll", "Leave", "AutoBack", "BackSec", "CalmSec",
     -- >>> BAN WATCH START <<<
-    "BanWatchOn", "BanLimit", "BanLeave",
+    "BanWatchOn", "BanLimit", "BanLeave", "BanCalmMin",
     -- >>> BAN WATCH END <<<
 }, { On = true })
 
@@ -14015,9 +14053,9 @@ do (function() -- isolated function: internal locals do not count toward the 200
     local gCtl = box(GuardTab, "Controls", true)
     local gAct = box(GuardTab, "Action when detected", true)
     local gTime = box(GuardTab, "Timing", false)
-        local gMore = box(GuardTab, "Lainnya", false)
+    local gMore = box(GuardTab, "Lainnya", false)
     -- >>> BAN WATCH START <<<
-    local gBan = box(GuardTab, "Pantau Ban (Log Global)", false)
+    local gBan = box(GuardTab, "Pantau Ban (Jeda World)", false)
     -- >>> BAN WATCH END <<<
 
     safe(function()
@@ -14101,36 +14139,44 @@ do (function() -- isolated function: internal locals do not count toward the 200
         })
     end)
 
-        -- >>> BAN WATCH START <<<
+    -- >>> BAN WATCH START <<<
     safe(function()
         UI.BanWatchStatus = gBan:Paragraph({ Title = "Status Ban Watch", Desc = "Mati" })
     end)
 
     safe(function()
         UI.BanWatchToggle = gBan:Toggle({
-            Title = "Pantau log ban",
-            Desc = "Kalau log chat berisi 'have banned' / 'was banned' mencapai batas, bot berhenti & keluar world.",
+            Title = "Pantau log ban / nuke",
+            Desc = "Kalau log 'have banned' / 'was nuked' mencapai batas, bot keluar world (jeda) dan masuk lagi setelah sepi.",
             Value = Guard.BanWatchOn,
             Callback = function(on)
                 Guard.BanWatchOn = on
-                if on then
-                    Guard.BanCount = 0
-                    table.clear(Guard.BanLog)
-                end
+                Guard.BanMode = "idle"
+                Guard.BanCount = 0
+                Guard.BanAt = 0
+                Guard.BanResetAt = 0
+                table.clear(Guard.BanLog)
             end,
         })
     end)
 
     addNumber(gBan, {
-        Title = "Batas log ban",
-        Desc = "Berapa log ban sebelum bot berhenti. Default 3.",
+        Title = "Batas log sebelum keluar",
+        Desc = "Berapa log ban / nuke sebelum bot keluar world. Default 3.",
         Min = 1, Max = 20, Step = 1, Default = Guard.BanLimit or 3,
         Callback = function(v) Guard.BanLimit = math.floor(v) end,
     })
 
+    addNumber(gBan, {
+        Title = "Menit sepi sebelum masuk lagi",
+        Desc = "Berapa menit tanpa log baru sebelum bot masuk world lagi. Default 30.",
+        Min = 1, Max = 240, Step = 1, Default = Guard.BanCalmMin or 30,
+        Callback = function(v) Guard.BanCalmMin = math.floor(v) end,
+    })
+
     safe(function()
         gBan:Toggle({
-            Title = "Keluar world setelah batas",
+            Title = "Keluar world saat batas tercapai",
             Desc = "Kalau mati, hanya berhenti aktivitas tanpa keluar world.",
             Value = Guard.BanLeave,
             Callback = function(on) Guard.BanLeave = on end,
@@ -14139,11 +14185,15 @@ do (function() -- isolated function: internal locals do not count toward the 200
 
     safe(function()
         gBan:Button({
-            Title = "Reset hitungan ban",
+            Title = "Reset hitungan & kembali sekarang",
+            Desc = "Paksa masuk world lagi tanpa menunggu timer.",
             Callback = function()
                 Guard.BanCount = 0
+                Guard.BanAt = 0
+                Guard.BanResetAt = 0
+                Guard.BanMode = "idle"
                 table.clear(Guard.BanLog)
-                notify("Ban Watch", "Hitungan direset", 3)
+                notify("Ban Watch", "Direset. Bot siap masuk lagi.", 3)
             end,
         })
     end)
@@ -14152,9 +14202,18 @@ do (function() -- isolated function: internal locals do not count toward the 200
         local shown
         while alive() do
             if UI.BanWatchStatus then
-                local text = ("Status: %s | Terdeteksi: %d / %d\nTerakhir: %s"):format(
-                    Guard.BanWatchOn and "AKTIF" or "Mati",
-                    Guard.BanCount, Guard.BanLimit,
+                local modeText
+                if Guard.BanMode == "away" then
+                    local elapsed = (os.clock() - Guard.BanAt) / 60
+                    local sinceLog = (os.clock() - Guard.BanResetAt) / 60
+                    local need = math.max(elapsed, sinceLog)
+                    local left = math.max(0, Guard.BanCalmMin - need)
+                    modeText = ("JEDA — masuk lagi dalam %.1f menit"):format(left)
+                else
+                    modeText = Guard.BanWatchOn and "AKTIF" or "Mati"
+                end
+                local text = ("Status: %s | Log: %d / %d\nTerakhir: %s"):format(
+                    modeText, Guard.BanCount, Guard.BanLimit,
                     #Guard.BanLog > 0 and Guard.BanLog[#Guard.BanLog] or "-")
                 if shown ~= text then
                     shown = text
